@@ -1,0 +1,19 @@
+# Data
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# R specific
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# renv specific
+renv/library/
+renv/local/
+renv/python/
+renv/staging/
+.DS_Store
+.idea/

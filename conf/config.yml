@@ -1,0 +1,18 @@
+data_paths:
+  alcoa: "data/raw/aa-rv-20m.txt"
+  pfizer: "data/raw/m-pfesp-ex9003.txt"
+  ppi: "data/raw/m-ppiaco4709.txt"
+  crsp: "data/raw/d-ibm3dxwkdays8008.txt"
+  ge: "data/raw/m-ge2608.txt"
+  fx: "data/raw/USDEUR.csv"
+
+output_paths:
+  clean_data: "data/processed/clean_data.rds"
+  models: "data/processed/models.rds"
+
+params:
+  nn_seed: 123
+  nn_test_size: 36
+  fx_train_year: "2011"
+  fx_test_year: "2012"
+  

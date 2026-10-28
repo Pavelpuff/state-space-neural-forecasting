@@ -1,0 +1,326 @@
+---
+title: "Time Series Analysis: State Space Models & Neural Networks"
+author: "Pavel Charheika"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    number_sections: true
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = 'center', fig.width = 7, fig.height = 4.5)
+
+# Load required packages
+library(forecast)
+library(dlm)    
+library(nnet)     
+library(lmtest)
+```
+
+# Executive Summary
+This research whitepaper explores advanced time series analysis techniques, transitioning from traditional static models to dynamic and non-linear frameworks. The study encompasses structural volatility filtering using State-Space models, dynamic systemic risk assessment (Time-Varying CAPM), macroeconomic signal extraction, calendar anomaly detection, and non-linear directional forecasting utilizing Feed-Forward Neural Networks. The objective is to demonstrate robust methodologies for processing noisy, real-world financial and macroeconomic data.
+
+##  Realized Volatility of Alcoa Stock (State Space Filtering)
+This section focuses on decoupling structural market shifts from transient intraday noise in the realized volatility of Alcoa stock.
+
+```{r}
+# Load the data
+alcoa_data <- read.table("../data/raw/aa-rv-20m.txt", header=FALSE)
+log_vol <- log(alcoa_data$V1) 
+
+# Fit a baseline ARIMA(0,1,1) model
+arima_011 <- arima(log_vol, order=c(0,1,1))
+summary(arima_011)
+
+# Estimate local trend state space model
+# Define the local level model structure
+build_local_trend <- function(theta) {
+  dlmModPoly(order = 1, dV = exp(theta[1]), dW = exp(theta[2]))
+}
+
+# MLE optimization for variance parameters
+fit_dlm <- dlmMLE(log_vol, parm = c(0, 0), build = build_local_trend)
+mod_dlm <- build_local_trend(fit_dlm$par)
+
+# Extract standard deviations
+sigma_e <- sqrt(mod_dlm$V)
+sigma_eta <- sqrt(mod_dlm$W)
+cat("Estimate of sigma_e:", sigma_e, "\\n")
+cat("Estimate of sigma_eta:", sigma_eta, "\\n")
+
+# Filter and smooth the state space variables
+filtered_state <- dlmFilter(log_vol, mod_dlm)
+smoothed_state <- dlmSmooth(filtered_state)
+
+# Calculate 95% Confidence Intervals for smoothed state
+var_smoothed <- dlmSvd2var(smoothed_state$U.S, smoothed_state$D.S)
+se_smoothed <- sqrt(unlist(var_smoothed))[-1] # Drop initial state variance
+upper_ci <- smoothed_state$s[-1] + 1.96 * se_smoothed
+lower_ci <- smoothed_state$s[-1] - 1.96 * se_smoothed
+
+# Plotting
+plot(log_vol, type='l', col='lightgray', main="Smoothed Local Trend of Alcoa Log Volatility")
+lines(smoothed_state$s[-1], col='blue', lwd=2)
+lines(upper_ci, col='red', lty=2)
+lines(lower_ci, col='red', lty=2)
+```
+
+**Business Insight**: Stock volatility isn't static; it tends to cluster in periods of high and low turbulence. By fitting an ARIMA(0,1,1) model to the log volatility series and comparing it against a state-space approach, we extract the true "underlying" volatility trend from noisy day-to-day fluctuations. This allows risk managers to better assess whether a sudden jump in volatility is a structural market shift or merely intraday noise.
+
+**Technical Rationale**: We estimate the local trend model, where the observation equation is $y_{t}=\mu_{t}+e_{t}$ with $e_{t}\sim N(0,\sigma_{e}^{2})$, and the state equation is $\mu_{t+1}=\mu_{t}+\eta_{t}$ with $\eta_{t}\sim N(0,\sigma_{\eta}^{2})$. The dlm package uses maximum likelihood to estimate the unobserved variances $\sigma_e$ and $\sigma_\eta$. Filtering provides real-time estimates, while smoothing uses the entire dataset to reconstruct the most likely historical path of the state variable with a pointwise 95% confidence interval. 
+
+## Time-Varying CAPM for Pfizer
+Traditional asset pricing assumes static risk profiles. Here, we model how Pfizer's systemic risk (Beta) and abnormal returns (Alpha) evolve dynamically.
+
+```{r}
+# Load the data
+pfizer_sp <- read.table("../data/raw/m-pfesp-ex9003.txt", header=TRUE)
+r_p <- pfizer_sp[,1] * 100 # Pfizer excess returns
+r_m <- pfizer_sp[,2] * 100 # S&P 500 excess returns
+
+# Fit a fixed-coefficient market model
+market_model <- lm(r_p ~ r_m)
+summary(market_model)
+
+# State Space Time-Varying CAPM
+# Define the dynamic regression model
+build_capm <- function(theta) {
+  mod <- dlmModReg(r_m, dV = exp(theta[1]), dW = c(exp(theta[2]), exp(theta[3])))
+  return(mod)
+}
+
+# MLE optimization
+fit_capm <- dlmMLE(r_p, parm = c(0, 0, 0), build = build_capm)
+mod_capm <- build_capm(fit_capm$par)
+
+# Standard errors of innovations
+se_epsilon <- sqrt(mod_capm$V)
+se_eta_alpha <- sqrt(mod_capm$W[1,1])
+se_eta_beta <- sqrt(mod_capm$W[2,2])
+
+cat("Std Error of observation equation (epsilon):", se_epsilon, "\\n")
+cat("Std Error of alpha innovations (eta):", se_eta_alpha, "\\n")
+cat("Std Error of beta innovations (epsilon_beta):", se_eta_beta, "\\n")
+
+# Filter and Smooth
+smoothed_capm <- dlmSmooth(r_p, mod_capm)
+alpha_t <- smoothed_capm$s[-1, 1]
+beta_t <- smoothed_capm$s[-1, 2]
+
+# Plot smoothed estimates
+par(mfrow=c(2,1))
+plot(alpha_t, type='l', main="Smoothed Estimate of Alpha_t", ylab="Alpha", xlab="Time")
+plot(beta_t, type='l', main="Smoothed Estimate of Beta_t", ylab="Beta", xlab="Time")
+par(mfrow=c(1,1))
+```
+
+**Business Insight**: The traditional Capital Asset Pricing Model assumes a stock's risk profile (Beta) and its abnormal return (Alpha) remain constant over time. However, a company like Pfizer evolves—patents expire, new drugs are approved, and market dynamics shift. By moving from a fixed-coefficient model  to a dynamic model, we visualize how Pfizer's systemic risk (Beta) and intrinsic value generation (Alpha) fluctuate month by month.  
+
+**Technical Rationale**: We express a time-varying CAPM as a state space model. The system is defined as $r_{t}=\alpha_{t}+\beta_{t}r_{M,t}+\epsilon_{t}$ for the observation, governed by the random walks $\alpha_{t+1}=\alpha_{t}+\eta_{t}$ and $\beta_{t+1}=\beta_{t}+\epsilon_{t}$. The dlmModReg function seamlessly constructs this time-varying linear regression, allowing us to estimate the standard errors of the innovations and obtain time plots of the smoothed estimates of $\alpha_{t}$ and $\beta_{t}$.
+
+## Macroeconomic Signal Extraction: U.S. Producer Price Index (PPI)
+Economic indicators are prone to measurement errors. This section filters out artificial noise to reveal the true underlying macroeconomic trajectory of the U.S. PPI.
+
+```{r}
+# Load the data
+ppi_data <- read.table("../data/raw/m-ppiaco4709.txt", header=TRUE)
+Z_t <- ppi_data[,4] # PPI column
+
+# Calculate log returns (z_t) and mean-corrected series (y_t)
+z_t <- diff(log(Z_t))
+y_t <- z_t - mean(z_t)
+
+# Fit an AR(3) model to y_t
+ar3_model <- arima(y_t, order=c(3,0,0), include.mean=FALSE)
+summary(ar3_model)
+
+# State Space form with independent measurement errors
+# Define AR(3) plus measurement noise
+build_ar3_ss <- function(theta) {
+  mod <- dlmModARMA(ar = ar3_model$coef[1:3], sigma2 = exp(theta[1]))
+  # Add measurement error variance
+  mod$V <- exp(theta[2]) 
+  return(mod)
+}
+
+# Optimization for variances
+fit_ar3_ss <- dlmMLE(y_t, parm = c(0, 0), build = build_ar3_ss)
+mod_ar3_ss <- build_ar3_ss(fit_ar3_ss$par)
+
+cat("Innovational variance to state:", exp(fit_ar3_ss$par[1]), "\\n")
+cat("Measurement error variance (sigma_e^2):", mod_ar3_ss$V, "\\n")
+
+# Filter and Smooth
+filtered_ar3 <- dlmFilter(y_t, mod_ar3_ss)
+smoothed_ar3 <- dlmSmooth(filtered_ar3)
+
+# Extract x_t (first element of the state vector in dlm representation)
+x_t_smoothed <- smoothed_ar3$s[-1, 1]
+
+# Filtered response residuals
+# Expected observation is F %*% a_t, residual is y_t - f_t
+f_t <- sapply(1:length(y_t), function(i) mod_ar3_ss$FF %*% filtered_ar3$a[i, ])
+filtered_residuals <- y_t - f_t
+
+# Plotting
+par(mfrow=c(2,1))
+plot(x_t_smoothed, type='l', main="Smoothed Estimate of x_t (Underlying AR(3) Process)")
+plot(filtered_residuals, type='l', main="Filtered Response Residuals of State Space Model")
+par(mfrow=c(1,1))
+```
+
+**Business Insight**: Economic indicators like the PPI often contain measurement errors or short-term noise that obscure the true macroeconomic trajectory. By treating the observed inflation rate as a combination of a "true" economic signal and "measurement noise," we can filter out the artificial volatility. The smoothed state provides a much cleaner, more reliable gauge of true commodity inflation.
+
+**Technical Rationale**: We begin by letting $z_{t}=\ln(Z_{t})-\ln(Z_{t-1})$, where $Z_{t}$ is the observed monthly PPI. After mean-correcting to get $y_{t}$ , we fit an AR(3) model to $y_{t}$. We then assume $y_{t}$ has independent measurement errors so that $y_{t}=x_{t}+e_{t}$ where $x_{t}$ is a zero-mean AR(3) process and $Var(e_{t})=\sigma_{e}^{2}$. The state space formulation enables us to isolate the system innovations from the observation variance, $\sigma_{e}^{2}$ , and plot both the smoothed estimate of $x_{t}$ and the filtered response residuals. 
+
+## Market Efficiency: Day-of-the-Week Effects in CRSP Returns
+We test the efficient market hypothesis by evaluating historical calendar anomalies and residual autocorrelation structures.
+
+```{r}
+# Load the data
+returns_data <- read.table("../data/raw/d-ibm3dxwkdays8008.txt", header=TRUE)
+EW <- returns_data$ew
+M <- returns_data$M
+T_day <- returns_data$T
+W <- returns_data$W
+R <- returns_data$R
+F_day <- returns_data$F
+
+# Regression model to study trading days
+# Suppress the intercept to get a coefficient for every day
+lm_week <- lm(EW ~ M + T_day + W + R + F_day - 1)
+# Check significance at 5% level
+summary(lm_week)
+
+# Check for correlations in residuals
+res_week <- residuals(lm_week)
+acf(res_week, main="ACF of Regression Residuals")
+Box.test(res_week, lag=10, type="Ljung-Box")
+
+# Build a suitable time series model for residuals
+ts_model_res <- auto.arima(res_week)
+summary(ts_model_res)
+```
+
+**Business Insight**: Historically, stock markets exhibited calendar anomalies, such as the "Monday effect," where returns on Mondays were statistically lower than on other days. By regressing the equal-weighted index against weekday indicators, we test if algorithmic trading and market efficiency have erased these behavioral patterns. Even after accounting for these days, residual analysis often reveals lingering momentum or mean-reversion, requiring a sophisticated time series overlay to map the market's structure fully.
+
+**Technical Rationale**: We utilize a multiple linear regression model to study the effects of trading days on equal-weighted index returns. By omitting the intercept, the model provides direct mean return estimates for each weekday, allowing the evaluation of weekday effect significance at the 5% level via standard t-tests. The ACF plot and Ljung-Box test confirm correlations in regression residuals. This significant autocorrelation necessitates fitting an ARIMA framework (auto.arima) to model the remaining dependence structure.
+
+## Non-Linear Predictive Modeling: Forecasting GE Stock with Neural Networks
+Financial markets are inherently non-linear. Here, we deploy feed-forward neural networks to forecast the magnitude and directionality of GE stock returns.
+
+```{r}
+# Load Data
+ge_data <- read.table("../data/raw/m-ge2608.txt", header=TRUE)
+rtn <- ge_data[,1]
+
+# Create Lagged Data matrix
+n <- length(rtn)
+dataset <- data.frame(
+  rtn_t = rtn[4:n],
+  rtn_t1 = rtn[3:(n-1)],
+  rtn_t2 = rtn[2:(n-2)],
+  rtn_t3 = rtn[1:(n-3)]
+)
+
+# Split into Training and Test (last 3 years = 36 months)
+test_size <- 36
+train_idx <- 1:(nrow(dataset) - test_size)
+train_data <- dataset[train_idx, ]
+test_data <- dataset[-train_idx, ]
+
+# Build a 3-2-1 feed forward neural network for magnitude
+set.seed(123)
+nn_321 <- nnet(rtn_t ~ rtn_t1 + rtn_t2 + rtn_t3, data=train_data, 
+               size=2, linout=TRUE, trace=FALSE)
+
+# Forecast 1-step-ahead returns and calculate MSE
+preds_321 <- predict(nn_321, newdata=test_data)
+mse_321 <- mean((test_data$rtn_t - preds_321)^2)
+cat("MSE of 3-2-1 network (Returns Magnitude):", mse_321, "\\n")
+
+# Build a 6-5-1 feed forward neural network for direction
+# Create direction/sentiment variables
+dataset$drtn <- ifelse(dataset$rtn_t > 0, 1, 0)
+dataset$sign_t1 <- ifelse(dataset$rtn_t1 > 0, 1, -1)
+dataset$sign_t2 <- ifelse(dataset$rtn_t2 > 0, 1, -1)
+dataset$sign_t3 <- ifelse(dataset$rtn_t3 > 0, 1, -1)
+
+train_data_dir <- dataset[train_idx, ]
+test_data_dir <- dataset[-train_idx, ]
+
+set.seed(123)
+nn_651 <- nnet(drtn ~ rtn_t1 + rtn_t2 + rtn_t3 + sign_t1 + sign_t2 + sign_t3, 
+               data=train_data_dir, size=5, linout=FALSE, trace=FALSE)
+
+# Forecast direction and calculate MSE
+preds_651 <- predict(nn_651, newdata=test_data_dir)
+mse_651 <- mean((test_data_dir$drtn - preds_651)^2)
+cat("MSE of 6-5-1 network (Direction Classification):", mse_651, "\\n")
+```
+
+**Business Insight**: Financial markets are heavily non-linear. While standard ARIMA models look for straight-line relationships, artificial neural networks can uncover complex, hidden patterns in how past stock returns and their positive/negative sentiment (signs) influence tomorrow's price. Interestingly, predicting the exact magnitude of a return is notoriously difficult, but forecasting the direction (up or down) can sometimes yield better classification accuracy, which is highly valuable for binary options or trend-following algorithms.
+
+
+**Technical Rationale**: We partition the data to leave the last three years for forecast evaluation. For the first model, we utilize lagged returns as input to build a 3-2-1 feed forward neural network , specifying linout=TRUE since the target is continuous, and compute the Mean Squared Error (MSE). For the directional model, we define drtn = ifelse(rtn>0, 1, 0) , passing 6 inputs (3 lags + 3 signs) into a 5-node hidden layer to construct the 6-5-1 network. Because the target is binary, linout=FALSE utilizes a logistic activation function before we calculate the test MSE.
+
+## Adaptive Backtesting: Forecasting Exchange Rates (USD/EUR)
+In highly volatile environments, complex models often overfit. We evaluate a parsimonious, recursively updating model for exchange rate forecasting.
+
+```{r}
+# Load Data
+fx_data <- read.csv("../data/raw/USDEUR.csv")
+
+# Map R's automatic column names to our expected variables
+fx_data$Date <- as.Date(fx_data$End.Date)
+fx_data$Rate <- fx_data$USD.EUR
+
+# Sort data chronologically (oldest to newest) 
+fx_data <- fx_data[order(fx_data$Date), ]
+
+# Select two consecutive years: 2011 (Training) and 2012 (Testing)
+train_data <- subset(fx_data, format(Date, "%Y") == "2011")
+test_data <- subset(fx_data, format(Date, "%Y") == "2012")
+
+# We will work in log returns space to ensure stationarity
+price_train <- train_data$Rate
+price_test <- test_data$Rate
+
+# Recursive Prediction Function (ARIMA baseline)
+recursive_forecast <- function(p_train, p_test) {
+  n_test <- length(p_test)
+  forecasts <- numeric(n_test)
+  current_history <- p_train
+  
+  for(i in 1:n_test) {
+    # Work in return space
+    returns_hist <- diff(log(current_history))
+    
+    # Fit parsimonious AR(1) to returns
+    # A simple AR(1) or random walk usually dominates out-of-sample FX
+    fit <- arima(returns_hist, order=c(1,0,0), include.mean=FALSE)
+    pred_return <- predict(fit, n.ahead=1)$pred[1]
+    
+    # Translate forecast of returns to forecasts of prices
+    last_price <- tail(current_history, 1)
+    forecasts[i] <- last_price * exp(pred_return + 0.5 * fit$sigma2)
+    
+    # Update history with true observed value for next step (t to t+1)
+    current_history <- c(current_history, p_test[i])
+  }
+  return(forecasts)
+}
+
+# Generate predictions
+preds <- recursive_forecast(price_train, price_test)
+
+# Compute Sum of Squares of Forecast Errors
+ssq_loss <- sum((price_test - preds)^2)
+cat("Sum of Squares Loss:", ssq_loss, "\\n")
+```
+
+**Business Insight**: Exchange rates are notoriously close to a "random walk," meaning today's price is often the best predictor of tomorrow's price. When forecasting over a highly volatile period (like the Eurozone crisis around 2011-2012), highly complex models often fail because they over-optimize to past noise. A simpler, adaptive model that recursively updates with every new piece of daily information proves much more resilient in real-world trading environments.
+
+**Technical Rationale**: We select two consecutive years, using the first year as a training period to build process memory. We choose to work in return space by taking log returns to achieve stationarity, carefully remembering to translate our forecast of returns back to forecasts of prices via exponentiation. The prediction loop is strictly recursive: at time $t$ we use information up to $t-1$ to forecast $t$. We measure accuracy by computing the sum of squares of the loss: $\sum_{t}|p_{t}-\hat{p}_{t}|^{2}$. The choice of an AR(1) model reflects the instruction that parsimonious forecasts often perform best in live applications, minimizing the risk of out-of-sample degradation.
